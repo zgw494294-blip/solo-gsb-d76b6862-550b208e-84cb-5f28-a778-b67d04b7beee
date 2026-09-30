@@ -130,3 +130,44 @@ class IntegrateResponse(BaseModel):
     # /v1/standard-addition 的 measured_peaks；
     # 其 time_ms 序列可作为 /v1/assign 的 measured_times_ms
     peaks: list[MeasuredPeak]
+
+
+# ---------------------------------------------------------------------------
+# 空白扣除（POST /v1/blank-subtraction）
+# ---------------------------------------------------------------------------
+
+class BlankSubtractionRun(BaseModel):
+    # 单次色谱运行：与 /v1/integrate 相同的积分输入
+    samples: list[IntegrationSample] = Field(min_length=5, max_length=500)
+    start_index: StrictInt = Field(ge=0)
+    end_index: StrictInt = Field(ge=0)
+    apex_indices: list[StrictInt] = Field(min_length=2, max_length=60)
+    # 两枚内标在 apex_indices（即积分输出峰列表）中的下标
+    is_apex_idx_1: StrictInt
+    is_apex_idx_2: StrictInt
+
+
+class BlankSubtractionRequest(BaseModel):
+    # 两组共用的参考峰表与内标（同 /v1/assign）
+    reference_peaks: list[ReferencePeak] = Field(min_length=2, max_length=40)
+    is_ref_id_1: StrictStr
+    is_ref_id_2: StrictStr
+    tolerance_ms: StrictInt = Field(ge=0)
+    # 样本与空白两次运行；两组的采样时间与面积放大倍数可以不同
+    sample: BlankSubtractionRun
+    blank: BlankSubtractionRun
+
+
+class CorrectedPeakOut(BaseModel):
+    # 与样本峰顶同序：归属的参考 id（未归属为 null）与约分校正面积
+    ref_id: str | None
+    corrected_area: FractionOut
+
+
+class BlankSubtractionResponse(BaseModel):
+    sample_peaks: list[CorrectedPeakOut]
+    # 全部校正面积分母的最小公倍数：peaks 面积 = 校正面积 × area_scale
+    area_scale: int
+    # 按样本峰顶时间排序的整数峰数组（零面积保留），可直接作为
+    # /v1/standard-addition 的 measured_peaks
+    peaks: list[MeasuredPeak]

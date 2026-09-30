@@ -1,4 +1,4 @@
-# 离线色谱峰归属 / 标准加入法定量 / 峰面积积分 API
+# 离线色谱峰归属 / 标准加入法定量 / 峰面积积分 / 空白扣除 API
 
 - **峰归属**：基于 **两对互异内标** 对实测色谱峰进行正斜率仿射时间校准，并将实测峰与参考峰做
   **保序、一对一** 的最优归属。
@@ -7,6 +7,9 @@
 - **峰面积积分**：对原始色谱强度采样按峰顶分段（相邻峰顶间取强度最低的内部点为共用分界），
   逐段扣端点连线基线、截非负后按实际时间间隔精确梯形积分，输出约分分数面积与
   统一放大的整数峰数组。
+- **空白扣除**：对样本与空白两次运行分别积分并按峰顶时间归属，仅对归属**同一参考 id** 的峰
+  用各自精确面积（整数面积 ÷ 各自 area_scale）相减、负值截零，输出按样本峰顶顺序的
+  校正面积与统一放大的整数峰数组。
 
 Python 3.12 + FastAPI，全部时间/偏差/拟合/面积计算使用 `fractions.Fraction` 精确有理数，
 返回约分后的 `n/d`。
@@ -21,6 +24,7 @@ docker compose up --build -d
 - 峰归属：`POST http://localhost:8000/v1/assign`
 - 标准加入法定量：`POST http://localhost:8000/v1/standard-addition`
 - 峰面积积分：`POST http://localhost:8000/v1/integrate`
+- 空白扣除：`POST http://localhost:8000/v1/blank-subtraction`
 - 健康检查：`GET http://localhost:8000/health`
 - 交互文档：`http://localhost:8000/docs`（Swagger UI）
 
@@ -397,6 +401,154 @@ echo "$RESP" | jq '. as $r | {
   或相邻峰顶之间没有内部采样点；
 - 类型错误（布尔不会被当作整数、浮点不会被截断为整数）或缺少必填字段。
 
+## `POST /v1/blank-subtraction`（空白扣除）
+
+对**样本**与**空白**两次色谱运行做空白扣除：
+
+1. **分别积分**：两组各自复用 `/v1/integrate` 的积分流程（输入形状相同）；
+   两组的采样时间与面积放大倍数 `area_scale` 可以不同。
+2. **分别归属**：两组各自按峰顶时间复用 `/v1/assign` 的保序归属，
+   内标以其在 `apex_indices`（即积分输出峰列表）中的下标给出。
+3. **精确扣除**：仅当样本峰与空白峰归属**同一参考 id** 时，
+   用各自整数面积除以各自 `area_scale` 后的精确值相减，**负值截为零**；
+   空白没有该参考峰则不扣，样本未归属峰保持原面积，空白独有峰不输出。
+4. **整数放大**：取全部校正面积分母的**最小公倍数**作为 `area_scale`，
+   生成 `{time_ms, area}` 整数峰数组（零面积保留），可直接供定量接口使用。
+
+### 请求
+
+`Content-Type: application/json`
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `reference_peaks` | 数组，长度 2～40 | 两组**共用**的参考峰表，同 `/v1/assign` |
+| `is_ref_id_1` / `is_ref_id_2` | 字符串 | 两个互异的内标参考峰 id（两组共用） |
+| `tolerance_ms` | 非负整数 | 归属时允许的最大绝对偏差 |
+| `sample` / `blank` | 对象 | 样本 / 空白运行的积分输入与内标下标（见下） |
+
+`sample` / `blank` 每项：
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `samples` | 数组，长度 **5～500** | 同 `/v1/integrate`：`{time_ms, intensity}`，时间严格递增 |
+| `start_index` / `end_index` | 非负整数 | 积分起止采样点下标（含端点），`start_index < end_index` |
+| `apex_indices` | 整数数组，长度 **2～60** | 严格递增，严格位于起止之间，相邻至少隔一个内部采样点 |
+| `is_apex_idx_1` / `is_apex_idx_2` | 整数 | 两枚互异内标在 `apex_indices` 中的下标（从 0 开始） |
+
+```bash
+curl -s http://localhost:8000/v1/blank-subtraction \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "reference_peaks": [
+      {"id": "A", "time_ms": 3},
+      {"id": "B", "time_ms": 7}
+    ],
+    "is_ref_id_1": "A", "is_ref_id_2": "B",
+    "tolerance_ms": 0,
+    "sample": {
+      "samples": [
+        {"time_ms": 0,  "intensity": 1},
+        {"time_ms": 3,  "intensity": 4},
+        {"time_ms": 4,  "intensity": 2},
+        {"time_ms": 7,  "intensity": 5},
+        {"time_ms": 10, "intensity": 0}
+      ],
+      "start_index": 0, "end_index": 4,
+      "apex_indices": [1, 3],
+      "is_apex_idx_1": 0, "is_apex_idx_2": 1
+    },
+    "blank": {
+      "samples": [
+        {"time_ms": 0,  "intensity": 1},
+        {"time_ms": 5,  "intensity": 2},
+        {"time_ms": 6,  "intensity": 1},
+        {"time_ms": 9,  "intensity": 3},
+        {"time_ms": 14, "intensity": 1}
+      ],
+      "start_index": 0, "end_index": 4,
+      "apex_indices": [1, 3],
+      "is_apex_idx_1": 0, "is_apex_idx_2": 1
+    }
+  }'
+```
+
+样本两段面积为 `9/2`、`12`（`area_scale` 2，整数面积 9、24）；空白采样时间不同，
+两段面积为 `3`、`8`（`area_scale` 1，整数面积 3、8），其峰顶 5、9 经内标仿射校准后
+恰为参考时间 3、7。两组峰分别归属参考 `A`、`B`，精确扣除 `9/2 − 3 = 3/2`、
+`12 − 8 = 4`，分母最小公倍数为 2：
+
+```json
+{
+  "sample_peaks": [
+    {"ref_id": "A", "corrected_area": {"n": 3, "d": 2}},
+    {"ref_id": "B", "corrected_area": {"n": 4, "d": 1}}
+  ],
+  "area_scale": 2,
+  "peaks": [
+    {"time_ms": 3, "area": 3},
+    {"time_ms": 7, "area": 8}
+  ]
+}
+```
+
+### 响应字段
+
+- `sample_peaks`：与**样本峰顶同序**，每项含归属的参考 `ref_id`（未归属为 `null`）
+  与约分校正面积 `corrected_area`（`{"n", "d"}`，分母恒正）。
+- `area_scale`：全部校正面积分母的最小公倍数（整数，≥ 1）。
+- `peaks`：按**样本峰顶时间**排序的 `{time_ms, area}` 整数峰数组，
+  `area = 校正面积 × area_scale`；**零面积的峰保留**在数组中。
+
+### 与定量接口衔接
+
+`peaks` 的形状与 `/v1/standard-addition` 的 `measured_peaks` 完全一致，
+其 `time_ms` 序列可直接作为 `/v1/assign` 的 `measured_times_ms`。
+以下衔接示例假设已把上面的空白扣除响应保存在 shell 变量 `RESP` 中
+（`RESP=$(curl -s ... /v1/blank-subtraction ...)`），并依赖 `jq` 组装请求体：
+
+```bash
+# 空白扣除 -> 峰归属：样本峰顶时间序列作为 measured_times_ms
+echo "$RESP" | jq '{
+  reference_peaks: [{id:"A",time_ms:3},{id:"B",time_ms:7}],
+  measured_times_ms: [.peaks[].time_ms],
+  is_ref_id_1: "A", is_meas_idx_1: 0,
+  is_ref_id_2: "B", is_meas_idx_2: 1,
+  tolerance_ms: 0
+}' | curl -s http://localhost:8000/v1/assign \
+  -H 'Content-Type: application/json' -d @-
+# => {"assignments":[0,1], ...}
+
+# 空白扣除 -> 标准加入法定量：校正峰数组作为各次进样的 measured_peaks
+# （演示用：追加一枚 20ms 内标峰，并令目标峰面积随加标浓度线性 +16/浓度；
+#   实际使用中应对每次加标进样分别调用 /v1/blank-subtraction 取各自的 peaks）
+echo "$RESP" | jq '. as $r | {
+  reference_peaks: [{id:"T",time_ms:3},{id:"S1",time_ms:7},{id:"S2",time_ms:20}],
+  target_ref_id: "T",
+  is_ref_id_1: "S1", is_ref_id_2: "S2",
+  tolerance_ms: 0,
+  injections: [0, 5, 10] | map(. as $c | {
+    added_concentration: $c,
+    measured_peaks: ($r.peaks + [{time_ms: 20, area: 50}] | .[0].area += 16 * $c),
+    is_meas_idx_1: 1, is_meas_idx_2: 2
+  })
+}' | curl -s http://localhost:8000/v1/standard-addition \
+  -H 'Content-Type: application/json' -d @-
+# => {"slope":{"n":2,"d":1},"intercept":{"n":3,"d":8},
+#     "sample_concentration":{"n":3,"d":16}, ...}
+```
+
+端到端可运行版本见 `tests/test_blank_subtraction_api.py` 的衔接测试。
+
+### 错误处理（HTTP 422）
+
+以下情况均返回 `422 Unprocessable Entity`，响应体为 `{"detail": "原因"}`：
+
+- 任一组的积分或归属失败：消息以 **`sample: `** 或 **`blank: `** 前缀指出
+  出错的组别，正文同 `/v1/integrate` 与 `/v1/assign` 的校验规则
+  （如 `blank: apex indices must be strictly increasing`）；
+- 共用参考峰表/内标/容差不合法（在处理样本组时被发现，前缀为 `sample: `）；
+- 类型错误（布尔不会被当作整数、浮点不会被截断为整数）或缺少必填字段。
+
 ## 本地开发与测试
 
 不用 Docker 时：
@@ -423,6 +575,7 @@ app/
   assignment.py         # 仿射校准 + 区间 DP 归属（纯函数）
   standard_addition.py  # 标准加入法：逐次归属 + 精确最小二乘（纯函数）
   integration.py        # 峰面积积分：分段 + 扣基线 + 精确梯形积分（纯函数）
+  blank_subtraction.py  # 空白扣除：双运行积分 + 归属 + 精确相减（纯函数）
 tests/                  # API 测试与算法对拍测试
 Dockerfile
 docker-compose.yml
