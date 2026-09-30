@@ -1,6 +1,7 @@
 """FastAPI 入口：POST /v1/assign 离线色谱峰归属、
 POST /v1/standard-addition 标准加入法定量、
-POST /v1/integrate 原始强度采样峰面积积分。"""
+POST /v1/integrate 原始强度采样峰面积积分、
+POST /v1/blank-subtraction 样本/空白两次运行的空白扣除。"""
 
 from __future__ import annotations
 
@@ -8,10 +9,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .assignment import AssignmentError, assign_peaks
+from .blank_subtraction import blank_subtraction
 from .integration import integrate_peaks
 from .models import (
     AssignRequest,
     AssignResponse,
+    BlankSubtractionRequest,
+    BlankSubtractionResponse,
     IntegrateRequest,
     IntegrateResponse,
     StandardAdditionRequest,
@@ -23,7 +27,7 @@ app = FastAPI(
     title="离线色谱峰归属 API",
     version="1.0.0",
     description="基于两对互异内标的正斜率仿射校准与保序一对一峰归属；"
-    "另提供标准加入法定量与原始强度采样峰面积积分。",
+    "另提供标准加入法定量、原始强度采样峰面积积分与样本/空白空白扣除。",
 )
 
 
@@ -75,4 +79,19 @@ async def integrate(request: IntegrateRequest) -> dict:
         start_index=request.start_index,
         end_index=request.end_index,
         apex_indices=list(request.apex_indices),
+    )
+
+
+@app.post(
+    "/v1/blank-subtraction",
+    response_model=BlankSubtractionResponse,
+)
+async def blank_subtraction_endpoint(request: BlankSubtractionRequest) -> dict:
+    return blank_subtraction(
+        ref_peaks=[p.model_dump() for p in request.reference_peaks],
+        is_ref_id_1=request.is_ref_id_1,
+        is_ref_id_2=request.is_ref_id_2,
+        tolerance_ms=request.tolerance_ms,
+        sample=request.sample.model_dump(),
+        blank=request.blank.model_dump(),
     )

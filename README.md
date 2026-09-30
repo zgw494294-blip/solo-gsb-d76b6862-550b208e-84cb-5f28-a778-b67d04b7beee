@@ -1,4 +1,4 @@
-# 离线色谱峰归属 / 标准加入法定量 / 峰面积积分 API
+# 离线色谱峰归属 / 标准加入法定量 / 峰面积积分 / 空白扣除 API
 
 - **峰归属**：基于 **两对互异内标** 对实测色谱峰进行正斜率仿射时间校准，并将实测峰与参考峰做
   **保序、一对一** 的最优归属。
@@ -6,6 +6,9 @@
   对 (加标浓度, 面积比) 做含截距精确最小二乘，给出斜率、截距与原样浓度。
 - **峰面积积分**：对原始色谱强度采样按峰顶分段（相邻峰顶间取强度最低的内部点为共用分界），
   逐段扣端点连线基线、截非负后按实际时间间隔精确梯形积分，输出约分分数面积与
+  统一放大的整数峰数组。
+- **空白扣除**：对样本与空白两次运行分别积分、按峰顶时间分别归属到共用参考峰表，
+  仅对归属同一参考 id 的峰对做精确面积相减（负值截为零），输出校正面积与
   统一放大的整数峰数组。
 
 Python 3.12 + FastAPI，全部时间/偏差/拟合/面积计算使用 `fractions.Fraction` 精确有理数，
@@ -21,6 +24,7 @@ docker compose up --build -d
 - 峰归属：`POST http://localhost:8000/v1/assign`
 - 标准加入法定量：`POST http://localhost:8000/v1/standard-addition`
 - 峰面积积分：`POST http://localhost:8000/v1/integrate`
+- 空白扣除：`POST http://localhost:8000/v1/blank-subtraction`
 - 健康检查：`GET http://localhost:8000/health`
 - 交互文档：`http://localhost:8000/docs`（Swagger UI）
 
@@ -397,6 +401,153 @@ echo "$RESP" | jq '. as $r | {
   或相邻峰顶之间没有内部采样点；
 - 类型错误（布尔不会被当作整数、浮点不会被截断为整数）或缺少必填字段。
 
+## `POST /v1/blank-subtraction`（空白扣除）
+
+对**样本**与**空白**两次色谱运行做空白扣除：
+
+1. **分别积分**：两组各自按 `/v1/integrate` 的规则对原始强度采样积分
+   （两组可有不同的采样时间与面积放大倍数 `area_scale`）。
+2. **分别归属**：两组各自按峰顶时间复用 `/v1/assign` 的保序归属，
+   共用同一份参考峰表、同一对内标参考 id 与容差。
+3. **精确扣除**：仅当样本峰与空白峰归属**同一参考 id** 时，
+   用各自整数面积除以各自 `area_scale` 后精确相减，**负值截为零**；
+   空白没有该参考峰则不扣，样本未归属峰保持原面积，空白独有峰不输出。
+4. **整数放大**：取全部校正面积分母的**最小公倍数**作为 `area_scale`，
+   生成 `{time_ms, area}` 整数峰数组（零面积保留），可直接供定量接口使用。
+
+### 请求
+
+`Content-Type: application/json`
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `reference_peaks` | 数组，长度 2～40 | 两组共用的参考峰表：`{id, time_ms}`，`id` 唯一、时间严格递增 |
+| `is_ref_id_1` / `is_ref_id_2` | 字符串 | 两个互异的内标参考峰 id，必须存在于参考峰中 |
+| `tolerance_ms` | 非负整数 | 归属时允许的最大绝对偏差 |
+| `sample` / `blank` | 对象 | 样本 / 空白运行的积分输入与内标位置（结构相同，见下） |
+
+`sample` / `blank` 每项：
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `samples` | 数组，长度 **5～500** | 同 `/v1/integrate`：`{time_ms: 整数, intensity: 非负整数}`，`time_ms` 严格递增 |
+| `start_index` / `end_index` | 非负整数 | 积分起止采样点下标（含端点），须 `< len(samples)` 且 `start_index < end_index` |
+| `apex_indices` | 整数数组，长度 **2～60** | 严格递增的峰顶下标；须严格位于起止之间，相邻峰顶至少隔一个内部采样点 |
+| `is_meas_idx_1` / `is_meas_idx_2` | 整数 | 两枚内标在**峰顶列表**（即本组积分输出峰数组）中的下标 |
+
+```bash
+curl -s http://localhost:8000/v1/blank-subtraction \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "reference_peaks": [
+      {"id": "A",  "time_ms": 20},
+      {"id": "S1", "time_ms": 60},
+      {"id": "B",  "time_ms": 70},
+      {"id": "S2", "time_ms": 80}
+    ],
+    "is_ref_id_1": "S1", "is_ref_id_2": "S2",
+    "tolerance_ms": 0,
+    "sample": {
+      "samples": [
+        {"time_ms": 0,   "intensity": 2},
+        {"time_ms": 10,  "intensity": 5},
+        {"time_ms": 20,  "intensity": 9},
+        {"time_ms": 30,  "intensity": 5},
+        {"time_ms": 40,  "intensity": 3},
+        {"time_ms": 50,  "intensity": 4},
+        {"time_ms": 60,  "intensity": 8},
+        {"time_ms": 70,  "intensity": 2},
+        {"time_ms": 80,  "intensity": 5},
+        {"time_ms": 90,  "intensity": 3},
+        {"time_ms": 100, "intensity": 2}
+      ],
+      "start_index": 0, "end_index": 10,
+      "apex_indices": [2, 6, 8],
+      "is_meas_idx_1": 1, "is_meas_idx_2": 2
+    },
+    "blank": {
+      "samples": [
+        {"time_ms": 0, "intensity": 0},
+        {"time_ms": 1, "intensity": 5},
+        {"time_ms": 2, "intensity": 1},
+        {"time_ms": 3, "intensity": 1},
+        {"time_ms": 4, "intensity": 6},
+        {"time_ms": 5, "intensity": 1},
+        {"time_ms": 6, "intensity": 1},
+        {"time_ms": 7, "intensity": 4},
+        {"time_ms": 8, "intensity": 0}
+      ],
+      "start_index": 0, "end_index": 8,
+      "apex_indices": [1, 4, 7],
+      "is_meas_idx_1": 0, "is_meas_idx_2": 2
+    }
+  }'
+```
+
+样本组峰顶时间 20/60/80、面积 115/70/40（`area_scale` 1），归属 A/S1/S2；
+空白组（不同的采样网格）峰顶时间 1/4/7、段面积 9/2、5、4（`area_scale` 2，
+整数面积 9/10/8），归属 S1/B/S2。扣除：A 空白无此参考峰不扣（115），
+S1 为 `70 − 9/2 = 131/2`，S2 为 `40 − 4 = 36`；空白独有的 B 峰不输出：
+
+```json
+{
+  "corrected_peaks": [
+    {"ref_id": "A",  "corrected_area": {"n": 115, "d": 1}},
+    {"ref_id": "S1", "corrected_area": {"n": 131, "d": 2}},
+    {"ref_id": "S2", "corrected_area": {"n": 36,  "d": 1}}
+  ],
+  "area_scale": 2,
+  "peaks": [
+    {"time_ms": 20, "area": 230},
+    {"time_ms": 60, "area": 131},
+    {"time_ms": 80, "area": 72}
+  ]
+}
+```
+
+### 响应字段
+
+- `corrected_peaks`：按**样本峰顶顺序**，每峰 `ref_id`（归属的参考 id，未归属为 `null`）
+  与约分 `corrected_area` 分数 `{"n", "d"}`，分母恒正。
+- `area_scale`：全部校正面积分母的最小公倍数（整数，≥ 1）。
+- `peaks`：按样本峰顶时间排序的 `{time_ms, area}` 整数峰数组，
+  `area = 校正面积 × area_scale`；**零面积的峰保留**在数组中。
+
+### 与定量接口衔接
+
+`peaks` 的形状与 `/v1/standard-addition` 的 `measured_peaks` 完全一致。
+以下示例假设已把上面的扣除响应保存在 shell 变量 `RESP` 中
+（`RESP=$(curl -s ... /v1/blank-subtraction ...)`），并依赖 `jq` 组装请求体
+（演示用：令目标峰 A 面积随加标浓度线性 +100/浓度；实际使用中应对每次
+加标进样分别做空白扣除取各自的 `peaks`）：
+
+```bash
+echo "$RESP" | jq '. as $r | {
+  reference_peaks: [{id:"A",time_ms:20},{id:"S1",time_ms:60},
+                    {id:"B",time_ms:70},{id:"S2",time_ms:80}],
+  target_ref_id: "A",
+  is_ref_id_1: "S1", is_ref_id_2: "S2",
+  tolerance_ms: 0,
+  injections: [0, 5, 10] | map(. as $c | {
+    added_concentration: $c,
+    measured_peaks: ($r.peaks | .[0].area += 100 * $c),
+    is_meas_idx_1: 1, is_meas_idx_2: 2
+  })
+}' | curl -s http://localhost:8000/v1/standard-addition \
+  -H 'Content-Type: application/json' -d @-
+# => {"slope":{"n":100,"d":131},"intercept":{"n":230,"d":131},
+#     "sample_concentration":{"n":23,"d":10}, ...}
+```
+
+端到端可运行版本见 `tests/test_blank_subtraction_api.py` 的衔接测试。
+
+### 错误处理（HTTP 422）
+
+除继承 `/v1/assign` 与 `/v1/integrate` 的全部校验外（参考峰表、内标、容差、
+采样点、起止下标、峰顶下标等），**任一组的积分或归属失败都会在消息中指出
+组别**，形如 `sample: ...` / `blank: ...`；参考峰表等共用输入的错误不带组别前缀。
+类型错误（布尔不会被当作整数、浮点不会被截断为整数）或缺少必填字段同样返回 422。
+
 ## 本地开发与测试
 
 不用 Docker 时：
@@ -412,7 +563,7 @@ pytest -q
 
 测试包含固定边界用例，以及 400 组随机实例与全局暴力枚举（枚举所有保序配对链）对拍，
 验证“最大配对数 → 最小绝对偏差和 → 字典序最小”三级目标；积分接口另有 300 组随机实例
-与独立浮点参照实现对拍，并含积分 → 归属 / 定量的端到端衔接测试。
+与独立浮点参照实现对拍，并含积分 → 归属 / 定量、空白扣除 → 定量的端到端衔接测试。
 
 ## 目录结构
 
@@ -423,6 +574,7 @@ app/
   assignment.py         # 仿射校准 + 区间 DP 归属（纯函数）
   standard_addition.py  # 标准加入法：逐次归属 + 精确最小二乘（纯函数）
   integration.py        # 峰面积积分：分段 + 扣基线 + 精确梯形积分（纯函数）
+  blank_subtraction.py  # 空白扣除：双运行积分 + 归属 + 精确面积相减（纯函数）
 tests/                  # API 测试与算法对拍测试
 Dockerfile
 docker-compose.yml

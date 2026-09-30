@@ -130,3 +130,47 @@ class IntegrateResponse(BaseModel):
     # /v1/standard-addition 的 measured_peaks；
     # 其 time_ms 序列可作为 /v1/assign 的 measured_times_ms
     peaks: list[MeasuredPeak]
+
+
+# ---------------------------------------------------------------------------
+# 空白扣除（POST /v1/blank-subtraction）
+# ---------------------------------------------------------------------------
+
+class BlankSubtractionRun(BaseModel):
+    # 一组色谱运行（样本或空白）的积分输入与内标位置
+    samples: list[IntegrationSample] = Field(min_length=5, max_length=500)
+    # 积分起止下标（含），须为合法采样点下标且 start < end
+    start_index: StrictInt = Field(ge=0)
+    end_index: StrictInt = Field(ge=0)
+    # 严格递增的峰顶下标；约束同 /v1/integrate（业务层校验）
+    apex_indices: list[StrictInt] = Field(min_length=2, max_length=60)
+    # 两枚内标在峰顶列表（即积分输出峰数组）中的下标
+    is_meas_idx_1: StrictInt
+    is_meas_idx_2: StrictInt
+
+
+class BlankSubtractionRequest(BaseModel):
+    # 两组共用的参考峰表与内标参考 id（同 /v1/assign）
+    reference_peaks: list[ReferencePeak] = Field(min_length=2, max_length=40)
+    is_ref_id_1: StrictStr
+    is_ref_id_2: StrictStr
+    tolerance_ms: StrictInt = Field(ge=0)
+    # 样本与空白两组运行；可有不同采样时间与面积放大倍数
+    sample: BlankSubtractionRun
+    blank: BlankSubtractionRun
+
+
+class CorrectedPeakOut(BaseModel):
+    # 样本峰归属的参考 id，未归属为 null
+    ref_id: str | None
+    corrected_area: FractionOut
+
+
+class BlankSubtractionResponse(BaseModel):
+    # 按样本峰顶顺序，每峰参考 id（或 null）与约分校正面积
+    corrected_peaks: list[CorrectedPeakOut]
+    # 全部校正面积分母的最小公倍数：peaks 面积 = 校正面积 × area_scale
+    area_scale: int
+    # 按样本峰顶时间排序的整数峰数组（零面积保留），可直接作为
+    # /v1/standard-addition 的 measured_peaks
+    peaks: list[MeasuredPeak]
